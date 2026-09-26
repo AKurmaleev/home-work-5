@@ -1,0 +1,12 @@
+[package]
+name = "blazing_shell"
+version = "0.1.0"
+edition = "2024"
+default-run = "blazing_shell"
+
+[dependencies]
+
+[[bin]]
+name = "shell_fixture"
+path = "tests/support/shell_fixture.rs"
+test = false
