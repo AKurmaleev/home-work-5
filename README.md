@@ -1,14 +1,14 @@
-# ДЗ 5 — `blazing_shell`
+# Homework 5 — `blazing_shell`
 
-Минимальная оболочка на Rust по лекции 9 «Process Control». Реализованы все три части задания: запуск команд, обработка ошибок и один pipe. Это учебный shell, **не** замена Bash и не песочница для недоверенных команд.
+A minimal shell in Rust based on lecture 9, “Process Control”. Implements all three parts of the assignment: command execution, error handling, and a single pipe. This is an educational shell, **not** a replacement for Bash or a sandbox for untrusted commands.
 
-## Запуск
+## Running
 
 ```sh
 cargo run
 ```
 
-После приглашения `blazing_shell> ` можно вводить команды:
+Enter commands after the `blazing_shell> ` prompt:
 
 ```text
 blazing_shell> rustc --version
@@ -16,16 +16,16 @@ blazing_shell> cat Cargo.toml | grep name
 blazing_shell> exit
 ```
 
-Вторая строка требует установленных `cat` и `grep` (например, в Linux). Команда `exit` или конец ввода завершают оболочку.
+The second line requires `cat` and `grep` to be installed (for example, on Linux). The `exit` command or end of input terminates the shell.
 
-## Как устроено
+## How it works
 
-- `src/main.rs`: чтение строк и разбор по пробелам; запуск через `std::process::Command` с аргументами без `sh -c`; ожидание завершения и вывод ошибок/ненулевых статусов в stderr.
-- Для `left | right` stdout первого процесса передаётся в stdin второго через `Stdio::piped()` и `Stdio::from(...)`. Родитель не читает весь поток в память; ожидание обоих процессов освобождает ресурсы. Если второй процесс не стартовал, первый останавливается и дожидается завершения.
-- Пустые строки и ошибочный синтаксис pipe не завершают shell. Некорректный UTF-8 и несуществующая программа дают понятную ошибку, после которой появляется новый prompt.
-- `tests/shell_tests.rs` и тестовая программа `tests/support/shell_fixture.rs` проверяют выполнение команд, ошибки, pipe и поток данных больше ёмкости pipe без зависимости от Unix-утилит.
+- `src/main.rs`: reads lines and splits on whitespace; launches commands with arguments through `std::process::Command` without `sh -c`; waits for completion and reports errors/nonzero exit statuses to stderr.
+- For `left | right`, the first process's stdout is passed to the second process's stdin through `Stdio::piped()` and `Stdio::from(...)`. The parent does not read the entire stream into memory; waiting for both processes releases resources. If the second process fails to start, the first is stopped and waited for.
+- Empty lines and invalid pipe syntax do not terminate the shell. Invalid UTF-8 and a nonexistent program produce a clear error followed by a new prompt.
+- `tests/shell_tests.rs` and the test program `tests/support/shell_fixture.rs` verify command execution, errors, pipes, and a data stream larger than the pipe's capacity without depending on Unix utilities.
 
-## Проверка
+## Verification
 
 ```sh
 cargo fmt --all --check
@@ -33,6 +33,6 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
-## Границы задания
+## Assignment boundaries
 
-Поддерживается не более одного `|`. Аргументы разделяются пробелами; кавычки, экранирование, подстановки, перенаправление файлов, фоновые задания и встроенные команды кроме `exit` не реализованы. `|` распознаётся даже без пробелов. Запуск программы подчиняется правилам поиска исполняемых файлов ОС. Сама оболочка не вызывает `sh -c` и не обрабатывает другие метасимволы; особые типы исполняемых файлов (например, `.bat` на Windows) могут запускаться ОС через интерпретатор. Ввод рассчитан на локальную учебную сессию, не на неограниченный сетевой поток.
+At most one `|` is supported. Arguments are separated by whitespace; quoting, escaping, substitution, file redirection, background jobs, and built-in commands other than `exit` are not implemented. `|` is recognized even without surrounding spaces. Program execution follows the OS executable lookup rules. The shell itself does not invoke `sh -c` or process other metacharacters; special executable types (such as `.bat` on Windows) may be launched by the OS through an interpreter. Input is intended for a local educational session, not an unbounded network stream.
