@@ -85,7 +85,32 @@ fn stop_and_wait(child: &mut impl ChildCleanup) -> io::Result<()> {
     let kill_result = child.kill();
     // Reap the child even when terminating it fails.
     let wait_result = child.wait();
-    kill_result.and(wait_result)
+    combine_results(kill_result, wait_result)
+}
+
+fn combine_results(primary: io::Result<()>, secondary: io::Result<()>) -> io::Result<()> {
+    match (primary, secondary) {
+        (Err(primary), Err(secondary)) => Err(io::Error::new(
+            primary.kind(),
+            format!("{primary}; additional cleanup failure: {secondary}"),
+        )),
+        (Err(error), _) | (_, Err(error)) => Err(error),
+        (Ok(()), Ok(())) => Ok(()),
+    }
+}
+
+fn report_failure(
+    errors: &mut impl Write,
+    message: &str,
+    cleanup: io::Result<()>,
+) -> io::Result<()> {
+    let reporting = writeln!(errors, "{message}").map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("{message}; diagnostic write failed: {error}"),
+        )
+    });
+    combine_results(reporting, cleanup)
 }
 
 fn run_pipe(
@@ -103,10 +128,13 @@ fn run_pipe(
     };
 
     let Some(reader) = producer.stdout.take() else {
-        stop_and_wait(&mut producer)?;
-        return Err(io::Error::other(
-            "не удалось получить stdout первого процесса",
-        ));
+        let cleanup = stop_and_wait(&mut producer);
+        return combine_results(
+            Err(io::Error::other(
+                "не удалось получить stdout первого процесса",
+            )),
+            cleanup,
+        );
     };
     let mut consumer = match Command::new(right.program)
         .args(right.args)
@@ -116,8 +144,11 @@ fn run_pipe(
         Ok(child) => child,
         Err(error) => {
             let cleanup_result = stop_and_wait(&mut producer);
-            writeln!(errors, "Ошибка запуска '{}': {error}", right.program)?;
-            return cleanup_result;
+            return report_failure(
+                errors,
+                &format!("Ошибка запуска '{}': {error}", right.program),
+                cleanup_result,
+            );
         }
     };
 
@@ -127,17 +158,22 @@ fn run_pipe(
         Err(error) => {
             let consumer_cleanup = stop_and_wait(&mut consumer);
             let producer_cleanup = stop_and_wait(&mut producer);
-            writeln!(errors, "Ошибка ожидания '{}': {error}", right.program)?;
-            consumer_cleanup?;
-            return producer_cleanup;
+            return report_failure(
+                errors,
+                &format!("Ошибка ожидания '{}': {error}", right.program),
+                combine_results(consumer_cleanup, producer_cleanup),
+            );
         }
     };
     let left_status = match producer.wait() {
         Ok(status) => Some(status),
         Err(error) => {
             let cleanup_result = stop_and_wait(&mut producer);
-            writeln!(errors, "Ошибка ожидания '{}': {error}", left.program)?;
-            cleanup_result?;
+            report_failure(
+                errors,
+                &format!("Ошибка ожидания '{}': {error}", left.program),
+                cleanup_result,
+            )?;
             None
         }
     };
@@ -200,12 +236,14 @@ mod tests {
     impl ChildCleanup for FakeChild {
         fn kill(&mut self) -> io::Result<()> {
             self.calls.push("kill");
-            self.kill_error.map_or(Ok(()), |kind| Err(kind.into()))
+            self.kill_error
+                .map_or(Ok(()), |kind| Err(io::Error::new(kind, "kill failed")))
         }
 
         fn wait(&mut self) -> io::Result<()> {
             self.calls.push("wait");
-            self.wait_error.map_or(Ok(()), |kind| Err(kind.into()))
+            self.wait_error
+                .map_or(Ok(()), |kind| Err(io::Error::new(kind, "wait failed")))
         }
     }
 
@@ -227,6 +265,67 @@ mod tests {
             let result = stop_and_wait(&mut child);
             assert_eq!(child.calls, ["kill", "wait"]);
             assert_eq!(result.err().map(|error| error.kind()), expected_error);
+        }
+    }
+
+    #[test]
+    fn cleanup_preserves_both_failures() {
+        let mut child = FakeChild {
+            kill_error: Some(io::ErrorKind::PermissionDenied),
+            wait_error: Some(io::ErrorKind::Other),
+            ..FakeChild::default()
+        };
+        let error = stop_and_wait(&mut child).expect_err("both cleanup operations fail");
+        assert_eq!(child.calls, ["kill", "wait"]);
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert!(error.to_string().contains("kill failed"), "{error}");
+        assert!(error.to_string().contains("wait failed"), "{error}");
+    }
+
+    #[test]
+    fn combined_cleanup_keeps_errors_from_both_children() {
+        let mut consumer = FakeChild {
+            kill_error: Some(io::ErrorKind::PermissionDenied),
+            ..FakeChild::default()
+        };
+        let mut producer = FakeChild {
+            wait_error: Some(io::ErrorKind::Other),
+            ..FakeChild::default()
+        };
+        let consumer_cleanup = stop_and_wait(&mut consumer);
+        let producer_cleanup = stop_and_wait(&mut producer);
+        let error = combine_results(consumer_cleanup, producer_cleanup)
+            .expect_err("both children have cleanup failures");
+        assert_eq!(consumer.calls, ["kill", "wait"]);
+        assert_eq!(producer.calls, ["kill", "wait"]);
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert!(error.to_string().contains("kill failed"), "{error}");
+        assert!(error.to_string().contains("wait failed"), "{error}");
+    }
+
+    #[test]
+    fn failed_diagnostics_keep_initiating_and_cleanup_errors() {
+        struct BrokenDiagnostics;
+
+        impl Write for BrokenDiagnostics {
+            fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+                Err(io::Error::new(io::ErrorKind::BrokenPipe, "stderr failed"))
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let error = report_failure(
+            &mut BrokenDiagnostics,
+            "spawn failed",
+            Err(io::Error::other("cleanup failed")),
+        )
+        .expect_err("diagnostics and cleanup both fail");
+        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+        for message in ["spawn failed", "stderr failed", "cleanup failed"] {
+            assert!(error.to_string().contains(message), "{error}");
         }
     }
 

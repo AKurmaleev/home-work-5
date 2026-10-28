@@ -26,12 +26,31 @@ fn execute(input: &[u8]) -> io::Result<Output> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
-    shell
+    if let Err(error) = shell
         .stdin
         .take()
         .expect("piped stdin exists")
-        .write_all(input)?;
+        .write_all(input)
+    {
+        let kill = shell.kill();
+        let wait = shell.wait();
+        return Err(io::Error::new(
+            error.kind(),
+            format!("input write failed: {error}; cleanup kill: {kill:?}, wait: {wait:?}"),
+        ));
+    }
     shell.wait_with_output()
+}
+
+#[test]
+fn failed_input_write_reports_cleanup_outcome() {
+    let mut input = b"exit\n".to_vec();
+    input.extend(vec![b'\n'; 262_144]);
+    let error = execute(&input).expect_err("shell exits before accepting the full input");
+    let message = error.to_string();
+    assert!(message.contains("input write failed"), "{message}");
+    assert!(message.contains("cleanup kill:"), "{message}");
+    assert!(message.contains("wait:"), "{message}");
 }
 
 #[test]
