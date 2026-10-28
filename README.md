@@ -22,7 +22,7 @@ The second line requires `cat` and `grep` to be installed (for example, on Linux
 
 - `src/main.rs`: reads lines and splits on whitespace; launches commands with arguments through `std::process::Command` without `sh -c`; waits for completion and reports errors/nonzero exit statuses to stderr.
 - For `left | right`, the first process's stdout is passed to the second process's stdin through `Stdio::piped()` and `Stdio::from(...)`. The parent does not read the entire stream into memory; waiting for both processes releases resources. If the second process fails to start, the first is stopped and waited for.
-- Empty lines and invalid pipe syntax do not terminate the shell. Invalid UTF-8 and a nonexistent program produce a clear error followed by a new prompt.
+- Empty lines and invalid pipe syntax do not terminate the shell. Invalid UTF-8 and a nonexistent program produce a clear error followed by a new prompt. Process cleanup errors propagate to `main` and terminate the shell with a nonzero exit status. Cleanup always attempts to wait, even if termination fails; when both operations fail, the termination error takes precedence.
 - `tests/shell_tests.rs` and the test program `tests/support/shell_fixture.rs` verify command execution, errors, pipes, and a data stream larger than the pipe's capacity without depending on Unix utilities.
 
 ## Verification

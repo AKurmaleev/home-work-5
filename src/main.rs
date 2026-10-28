@@ -66,9 +66,26 @@ fn run_command(spec: CommandSpec<'_>, errors: &mut impl Write) -> io::Result<()>
     }
 }
 
-fn stop_and_wait(child: &mut Child) {
-    let _ = child.kill();
-    let _ = child.wait();
+trait ChildCleanup {
+    fn kill(&mut self) -> io::Result<()>;
+    fn wait(&mut self) -> io::Result<()>;
+}
+
+impl ChildCleanup for Child {
+    fn kill(&mut self) -> io::Result<()> {
+        Child::kill(self)
+    }
+
+    fn wait(&mut self) -> io::Result<()> {
+        Child::wait(self).map(|_| ())
+    }
+}
+
+fn stop_and_wait(child: &mut impl ChildCleanup) -> io::Result<()> {
+    let kill_result = child.kill();
+    // Reap the child even when terminating it fails.
+    let wait_result = child.wait();
+    kill_result.and(wait_result)
 }
 
 fn run_pipe(
@@ -86,7 +103,7 @@ fn run_pipe(
     };
 
     let Some(reader) = producer.stdout.take() else {
-        stop_and_wait(&mut producer);
+        stop_and_wait(&mut producer)?;
         return Err(io::Error::other(
             "не удалось получить stdout первого процесса",
         ));
@@ -98,8 +115,9 @@ fn run_pipe(
     {
         Ok(child) => child,
         Err(error) => {
-            stop_and_wait(&mut producer);
-            return writeln!(errors, "Ошибка запуска '{}': {error}", right.program);
+            let cleanup_result = stop_and_wait(&mut producer);
+            writeln!(errors, "Ошибка запуска '{}': {error}", right.program)?;
+            return cleanup_result;
         }
     };
 
@@ -107,16 +125,19 @@ fn run_pipe(
     let right_status = match consumer.wait() {
         Ok(status) => status,
         Err(error) => {
-            stop_and_wait(&mut consumer);
-            stop_and_wait(&mut producer);
-            return writeln!(errors, "Ошибка ожидания '{}': {error}", right.program);
+            let consumer_cleanup = stop_and_wait(&mut consumer);
+            let producer_cleanup = stop_and_wait(&mut producer);
+            writeln!(errors, "Ошибка ожидания '{}': {error}", right.program)?;
+            consumer_cleanup?;
+            return producer_cleanup;
         }
     };
     let left_status = match producer.wait() {
         Ok(status) => Some(status),
         Err(error) => {
-            stop_and_wait(&mut producer);
+            let cleanup_result = stop_and_wait(&mut producer);
             writeln!(errors, "Ошибка ожидания '{}': {error}", left.program)?;
+            cleanup_result?;
             None
         }
     };
@@ -168,6 +189,46 @@ fn main() -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Default)]
+    struct FakeChild {
+        kill_error: Option<io::ErrorKind>,
+        wait_error: Option<io::ErrorKind>,
+        calls: Vec<&'static str>,
+    }
+
+    impl ChildCleanup for FakeChild {
+        fn kill(&mut self) -> io::Result<()> {
+            self.calls.push("kill");
+            self.kill_error.map_or(Ok(()), |kind| Err(kind.into()))
+        }
+
+        fn wait(&mut self) -> io::Result<()> {
+            self.calls.push("wait");
+            self.wait_error.map_or(Ok(()), |kind| Err(kind.into()))
+        }
+    }
+
+    #[test]
+    fn cleanup_returns_errors_and_always_waits() {
+        use io::ErrorKind::{Other, PermissionDenied};
+
+        for (kill_error, wait_error, expected_error) in [
+            (None, None, None),
+            (Some(PermissionDenied), None, Some(PermissionDenied)),
+            (None, Some(Other), Some(Other)),
+            (Some(PermissionDenied), Some(Other), Some(PermissionDenied)),
+        ] {
+            let mut child = FakeChild {
+                kill_error,
+                wait_error,
+                ..FakeChild::default()
+            };
+            let result = stop_and_wait(&mut child);
+            assert_eq!(child.calls, ["kill", "wait"]);
+            assert_eq!(result.err().map(|error| error.kind()), expected_error);
+        }
+    }
 
     #[test]
     fn parses_single_command_and_arguments() {
